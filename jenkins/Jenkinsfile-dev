@@ -1,75 +1,96 @@
 pipeline {
-    agent { 
+    agent {
         node {
-            label 'maven'  // 使用 maven 创建一个用于构建的代理节点
+            label 'maven'               // 使用现有的 maven 节点（Podman 镜像）
         }
     }
 
     parameters {
-        string(name:'TAG_NAME',defaultValue: '',description:'')  // 传参设置 
+        string(name: 'TAG_NAME', defaultValue: '', description: '自定义标签（可选）')
     }
 
     environment {
-        DOCKER_CREDENTIAL_ID = 'demo-dockerhub-certificate'  // 使用第一步的 dockerhub 凭证名称，可以根据自己的设置修改
-        GITHUB_CREDENTIAL_ID = 'demo-github-certificate' // 使用第一步的 github 凭证名称，可以根据自己的设置修改
-        KUBECONFIG_CREDENTIAL_ID = 'demo-deploy-certificate' // 使用第一步的 kubeconfig 凭证名称，可以根据自己的设置修改
-        REGISTRY = 'docker.io' // 默认使用 dockerhub 的仓库地址，可以根据需求改为自己的仓库地址，例如阿里云，青云之类的
-        DOCKERHUB_NAMESPACE = 'cqiang1993' // dockerhub 的仓库名称
-        GITHUB_ACCOUNT = 'cqiang1993' // 自己的 github 的账号名称
-        APP_NAME = 'kubesphere-springboot-devops-sample' // 应用名称可自定义
+        // ----- 镜像仓库配置 -----
+        REGISTRY = '192.168.56.100:30002'           // Harbor 地址（HTTP）
+        DOCKERHUB_NAMESPACE = 'kubesphere'               // Harbor 项目名称
+        APP_NAME = 'kubesphere-springboot-devops-sample'
+
+        // ----- 凭证 ID（需在 Jenkins 中提前创建）-----
+        HARBOR_CREDENTIAL_ID = 'harbor-credential'  // Harbor 用户名/密码 凭证 ID
+        KUBECONFIG_CREDENTIAL_ID = 'demo-deploy-certificate'  // kubeconfig 凭证 ID
     }
-    // $+environment 里面的值就可以取出上面环境变量
+
     stages {
-        stage ('checkout scm') {   // 流程第一步，拉取源代码
+        stage('checkout scm') {
             steps {
                 checkout(scm)
             }
         }
 
-        stage ('build target && make docker image') { // 流程第二步，构建 jar 包和生成 docker 容器镜像
+        stage('build jar') {
             steps {
-                container ('maven') { // 使用 maven 容器
-                    sh 'mvn clean package' // 使用 mvn 打包 springboot 项目
-                    sh 'docker build -f build/Dockerfile-dev -t $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BRANCH_NAME-$BUILD_NUMBER .' // 制作版本镜像
+                container('maven') {
+                    sh 'mvn clean package'          // 编译打包，生成 target/*.jar
                 }
             }
         }
 
-        stage('push image to dockerhub'){ // 流程第三步，推送镜像到镜像仓库
-            when{  // 如果当前分支是 master 则进行后面的操作
-                branch 'master'
+        stage('build and push image') {
+            when {
+                branch 'master'                     // 仅 master 分支执行镜像构建推送
             }
-            steps{
-                container ('maven') {
-                    withCredentials([usernamePassword(passwordVariable : 'DOCKER_PASSWORD' ,usernameVariable : 'DOCKER_USERNAME' ,credentialsId : "$DOCKER_CREDENTIAL_ID" ,)]) {  // 使用凭证
-                        sh 'docker tag  $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BRANCH_NAME-$BUILD_NUMBER $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:latest' // 为镜像打上 latest 标签
-                        sh 'echo "$DOCKER_PASSWORD" | docker login $REGISTRY -u "$DOCKER_USERNAME" --password-stdin' // 使用凭证登录 dockerhub 仓库
-                        sh 'docker push  $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BRANCH_NAME-$BUILD_NUMBER' // 推送版本镜像
-                        sh 'docker push  $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:latest' // 推送 latest 镜像
+            steps {
+                container('maven') {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.HARBOR_CREDENTIAL_ID,
+                        usernameVariable: 'HARBOR_USERNAME',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )]) {
+                        sh '''
+                            # 定义镜像标签
+                            IMAGE_TAG="SNAPSHOT-${BRANCH_NAME}-${BUILD_NUMBER}"
+                            FULL_IMAGE="${REGISTRY}/${DOCKERHUB_NAMESPACE}/${APP_NAME}:${IMAGE_TAG}"
+                            LATEST_IMAGE="${REGISTRY}/${DOCKERHUB_NAMESPACE}/${APP_NAME}:latest"
+
+                            # 使用 Podman 登录 Harbor（HTTP 仓库需添加 --tls-verify=false） 查看jenkins配置字典：kubectl edit cm jenkins-casc-config -n kubesphere-devops-system
+                            podman login -u "${HARBOR_USERNAME}" -p "${HARBOR_PASSWORD}" "${REGISTRY}" --tls-verify=false
+
+                            # 构建镜像
+                            podman build -f build/Dockerfile-dev -t "${FULL_IMAGE}" .
+
+                            # 打 latest 标签
+                            podman tag "${FULL_IMAGE}" "${LATEST_IMAGE}"
+
+                            # 推送两个标签
+                            podman push "${FULL_IMAGE}" --tls-verify=false
+                            podman push "${LATEST_IMAGE}" --tls-verify=false
+                        '''
                     }
                 }
-
             }
         }
 
-        stage('deploy to dev') {  // 流程第四步，部署项目到 kubesphere 平台上
+        stage('deploy to dev') {
             agent {
                 node {
-                    label 'base' // 使用 base 创建一个用于部署的代理节点
+                    label 'base'                    // 使用 base 节点执行部署（kubectl 可用）
                 }
             }
-            when{ // 如果当前分支是 master 则进行后面的操作
+            when {
                 branch 'master'
             }
             steps {
-                container('base'){ // 使用 base 容器
-                    input(id: 'deploy-to-dev', message: 'deploy to dev?') // 中断等待是否部署的指令输入
-                    withCredentials([kubeconfigFile(credentialsId : "$KUBECONFIG_CREDENTIAL_ID" ,variable : 'KUBECONFIG')]) { // 使用 kubeconfig 凭证部署
-                        sh 'envsubst < deploy/dev-deploy.yaml |kubectl apply -f -' // 将环境变量替换并使用 kubectl 部署
+                container('base') {
+                    input(id: 'deploy-to-dev', message: 'deploy to dev?')
+                    withCredentials([kubeconfigFile(
+                        credentialsId: env.KUBECONFIG_CREDENTIAL_ID,
+                        variable: 'KUBECONFIG'
+                    )]) {
+                        // 用 envsubst 替换 YAML 中的环境变量，然后 apply
+                        sh 'envsubst < deploy/dev-deploy.yaml | kubectl apply -f -'
                     }
                 }
             }
         }
     }
 }
-

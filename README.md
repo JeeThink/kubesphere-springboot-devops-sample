@@ -1,2 +1,6 @@
 # kubesphere-springboot-devops-sample
-KubeSphere v3.2.1 SpringBoot DevOps 实战示例
+KubeSphere: v3.4.1 
+SpringBoot v2.7.18
+Repository: Harbor
+
+![输入图片说明](imgimage.png)

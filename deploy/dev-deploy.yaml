@@ -2,12 +2,12 @@ kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: kubesphere
-  namespace: demo-devops-java-sample
+  namespace: kubesphere-springboot-devops-sample
   labels:
     app: kubesphere
   annotations:
     deployment.kubernetes.io/revision: '1'
-    kubesphere.io/creator: chenqiang
+    kubesphere.io/creator: jeethink
 spec:
   replicas: 1
   selector:
@@ -76,7 +76,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  namespace: demo-devops-java-sample
+  namespace: kubesphere-springboot-devops-sample
   labels:
     app: kubesphere-svc
   name: kubesphere-svc
